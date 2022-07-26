@@ -9,23 +9,23 @@ import {
   Type,
 } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
-import { defer, lastValueFrom, of } from 'rxjs';
+import { defer, lastValueFrom } from 'rxjs';
 import {
   Connection,
-  ConnectionOptions,
   createConnection,
-  getConnectionManager,
+  DataSource,
+  DataSourceOptions,
 } from 'typeorm';
 import {
   generateString,
-  getConnectionName,
-  getConnectionToken,
+  getDataSourceName,
+  getDataSourceToken,
   getEntityManagerToken,
   handleRetry,
 } from './common/typeorm.utils';
 import { EntitiesMetadataStorage } from './entities-metadata.storage';
 import {
-  TypeOrmConnectionFactory,
+  TypeOrmDataSourceFactory,
   TypeOrmModuleAsyncOptions,
   TypeOrmModuleOptions,
   TypeOrmOptionsFactory,
@@ -48,77 +48,104 @@ export class TypeOrmCoreModule implements OnApplicationShutdown {
       provide: TYPEORM_MODULE_OPTIONS,
       useValue: options,
     };
-    const connectionProvider = {
-      provide: getConnectionToken(options as ConnectionOptions) as string,
-      useFactory: async () => await this.createConnectionFactory(options),
+    const dataSourceProvider = {
+      provide: getDataSourceToken(options as DataSourceOptions),
+      useFactory: async () => await this.createDataSourceFactory(options),
     };
     const entityManagerProvider = this.createEntityManagerProvider(
-      options as ConnectionOptions,
+      options as DataSourceOptions,
     );
+
+    const providers = [
+      entityManagerProvider,
+      dataSourceProvider,
+      typeOrmModuleOptions,
+    ];
+    const exports = [entityManagerProvider, dataSourceProvider];
+
+    // TODO: "Connection" class is going to be removed in the next version of "typeorm"
+    if (dataSourceProvider.provide === DataSource) {
+      providers.push({
+        provide: Connection,
+        useExisting: DataSource,
+      });
+      exports.push(Connection);
+    }
+
     return {
       module: TypeOrmCoreModule,
-      providers: [
-        entityManagerProvider,
-        connectionProvider,
-        typeOrmModuleOptions,
-      ],
-      exports: [entityManagerProvider, connectionProvider],
+      providers,
+      exports,
     };
   }
 
   static forRootAsync(options: TypeOrmModuleAsyncOptions): DynamicModule {
-    const connectionProvider = {
-      provide: getConnectionToken(options as ConnectionOptions) as string,
+    const dataSourceProvider = {
+      provide: getDataSourceToken(options as DataSourceOptions),
       useFactory: async (typeOrmOptions: TypeOrmModuleOptions) => {
         if (options.name) {
-          return await this.createConnectionFactory(
+          return await this.createDataSourceFactory(
             {
               ...typeOrmOptions,
               name: options.name,
             },
-            options.connectionFactory,
+            options.dataSourceFactory,
           );
         }
-        return await this.createConnectionFactory(
+        return await this.createDataSourceFactory(
           typeOrmOptions,
-          options.connectionFactory,
+          options.dataSourceFactory,
         );
       },
       inject: [TYPEORM_MODULE_OPTIONS],
     };
     const entityManagerProvider = {
-      provide: getEntityManagerToken(options as ConnectionOptions) as string,
-      useFactory: (connection: Connection) => connection.manager,
-      inject: [getConnectionToken(options as ConnectionOptions)],
+      provide: getEntityManagerToken(options as DataSourceOptions) as string,
+      useFactory: (dataSource: DataSource) => dataSource.manager,
+      inject: [getDataSourceToken(options as DataSourceOptions)],
     };
 
     const asyncProviders = this.createAsyncProviders(options);
+    const providers = [
+      ...asyncProviders,
+      entityManagerProvider,
+      dataSourceProvider,
+      {
+        provide: TYPEORM_MODULE_ID,
+        useValue: generateString(),
+      },
+      ...(options.extraProviders || []),
+    ];
+    const exports: Array<Provider | Function> = [
+      entityManagerProvider,
+      dataSourceProvider,
+    ];
+
+    // TODO: "Connection" class is going to be removed in the next version of "typeorm"
+    if (dataSourceProvider.provide === DataSource) {
+      providers.push({
+        provide: Connection,
+        useExisting: DataSource,
+      });
+      exports.push(Connection);
+    }
+
     return {
       module: TypeOrmCoreModule,
       imports: options.imports,
-      providers: [
-        ...asyncProviders,
-        entityManagerProvider,
-        connectionProvider,
-        {
-          provide: TYPEORM_MODULE_ID,
-          useValue: generateString(),
-        },
-        ...(options.extraProviders || []),
-      ],
-      exports: [entityManagerProvider, connectionProvider],
+      providers,
+      exports,
     };
   }
 
   async onApplicationShutdown(): Promise<void> {
-    if (this.options.keepConnectionAlive) {
-      return;
-    }
-    const connection = this.moduleRef.get<Connection>(
-      getConnectionToken(this.options as ConnectionOptions) as Type<Connection>,
+    const dataSource = this.moduleRef.get<DataSource>(
+      getDataSourceToken(this.options as DataSourceOptions) as Type<DataSource>,
     );
     try {
-      connection && (await connection.close());
+      if (dataSource && dataSource.isInitialized) {
+        await dataSource.destroy();
+      }
     } catch (e) {
       this.logger.error(e?.message);
     }
@@ -163,63 +190,62 @@ export class TypeOrmCoreModule implements OnApplicationShutdown {
   }
 
   private static createEntityManagerProvider(
-    options: ConnectionOptions,
+    options: DataSourceOptions,
   ): Provider {
     return {
       provide: getEntityManagerToken(options) as string,
-      useFactory: (connection: Connection) => connection.manager,
-      inject: [getConnectionToken(options)],
+      useFactory: (dataSource: DataSource) => dataSource.manager,
+      inject: [getDataSourceToken(options)],
     };
   }
 
-  private static async createConnectionFactory(
+  private static async createDataSourceFactory(
     options: TypeOrmModuleOptions,
-    connectionFactory?: TypeOrmConnectionFactory,
-  ): Promise<Connection> {
-    const connectionToken = getConnectionName(options as ConnectionOptions);
-    const createTypeormConnection = connectionFactory ?? createConnection;
+    dataSourceFactory?: TypeOrmDataSourceFactory,
+  ): Promise<DataSource> {
+    const dataSourceToken = getDataSourceName(options as DataSourceOptions);
+    const createTypeormDataSource =
+      dataSourceFactory ??
+      ((options: DataSourceOptions) => {
+        return DataSource === undefined
+          ? createConnection(options)
+          : new DataSource(options);
+      });
     return await lastValueFrom(
-      defer(() => {
-        try {
-          if (options.keepConnectionAlive) {
-            const connectionName = getConnectionName(
-              options as ConnectionOptions,
-            );
-            const manager = getConnectionManager();
-            if (manager.has(connectionName)) {
-              const connection = manager.get(connectionName);
-              if (connection.isConnected) {
-                return of(connection);
-              }
-            }
-          }
-        } catch {}
-
-        if (!options.type) {
-          return createTypeormConnection();
-        }
+      defer(async () => {
         if (!options.autoLoadEntities) {
-          return createTypeormConnection(options as ConnectionOptions);
+          const dataSource = await createTypeormDataSource(
+            options as DataSourceOptions,
+          );
+          // TODO: remove "dataSource.initialize" condition (left for backward compatibility)
+          return (dataSource as any).initialize && !dataSource.isInitialized
+            ? dataSource.initialize()
+            : dataSource;
         }
 
         let entities = options.entities;
-        if (entities) {
+        if (Array.isArray(entities)) {
           entities = entities.concat(
-            EntitiesMetadataStorage.getEntitiesByConnection(connectionToken),
+            EntitiesMetadataStorage.getEntitiesByDataSource(dataSourceToken),
           );
         } else {
           entities =
-            EntitiesMetadataStorage.getEntitiesByConnection(connectionToken);
+            EntitiesMetadataStorage.getEntitiesByDataSource(dataSourceToken);
         }
-        return createTypeormConnection({
+        const dataSource = await createTypeormDataSource({
           ...options,
           entities,
-        } as ConnectionOptions);
+        } as DataSourceOptions);
+
+        // TODO: remove "dataSource.initialize" condition (left for backward compatibility)
+        return (dataSource as any).initialize && !dataSource.isInitialized
+          ? dataSource.initialize()
+          : dataSource;
       }).pipe(
         handleRetry(
           options.retryAttempts,
           options.retryDelay,
-          connectionToken,
+          dataSourceToken,
           options.verboseRetryLog,
           options.toRetry,
         ),
