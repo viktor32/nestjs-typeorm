@@ -26,8 +26,9 @@ export class TypeOrmModule {
       | Connection
       | ConnectionOptions
       | string = DEFAULT_CONNECTION_NAME,
+    namespace?: string,
   ): DynamicModule {
-    const providers = createTypeOrmProviders(entities, connection);
+    const providers = createTypeOrmProviders(entities, connection, namespace);
     const customRepositoryEntities = getCustomRepositoryEntity(entities);
     EntitiesMetadataStorage.addEntitiesByConnection(connection, [
       ...entities,

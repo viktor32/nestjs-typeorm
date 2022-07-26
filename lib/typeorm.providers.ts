@@ -12,9 +12,10 @@ import { EntityClassOrSchema } from './interfaces/entity-class-or-schema.type';
 export function createTypeOrmProviders(
   entities?: EntityClassOrSchema[],
   connection?: Connection | ConnectionOptions | string,
+  namespace?: string,
 ): Provider[] {
   return (entities || []).map((entity) => ({
-    provide: getRepositoryToken(entity, connection),
+    provide: getRepositoryToken(entity, connection, namespace),
     useFactory: (connection: Connection) => {
       if (
         entity instanceof Function &&

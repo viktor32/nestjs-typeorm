@@ -1,5 +1,5 @@
 {
-  "name": "@nestjs/typeorm",
+  "name": "@pixelplex/nestjs-typeorm",
   "version": "8.0.4",
   "description": "Nest - modern, fast, powerful node.js web framework (@typeorm)",
   "author": "Kamil Mysliwiec",

@@ -20,33 +20,36 @@ const logger = new Logger('TypeOrmModule');
  * This function generates an injection token for an Entity or Repository
  * @param {EntityClassOrSchema} entity parameter can either be an Entity or Repository
  * @param {string} [connection='default'] Connection name
+ * @param {string} [namespace=''] Namespace for token
  * @returns {string} The Entity | Repository injection token
  */
 export function getRepositoryToken(
   entity: EntityClassOrSchema,
   connection: Connection | ConnectionOptions | string = DEFAULT_CONNECTION_NAME,
+  namespace = '',
 ): Function | string {
   if (entity === null || entity === undefined) {
     throw new CircularDependencyException('@InjectRepository()');
   }
   const connectionPrefix = getConnectionPrefix(connection);
+  const namespacePrefix = namespace ? `${namespace}_` : '';
   if (
     entity instanceof Function &&
     (entity.prototype instanceof Repository ||
       entity.prototype instanceof AbstractRepository)
   ) {
-    if (!connectionPrefix) {
+    if (!connectionPrefix && !namespacePrefix) {
       return entity;
     }
-    return `${connectionPrefix}${getCustomRepositoryToken(entity)}`;
+    return `${namespacePrefix}${connectionPrefix}${getCustomRepositoryToken(entity)}`;
   }
 
   if (entity instanceof EntitySchema) {
-    return `${connectionPrefix}${
+    return `${namespacePrefix}${connectionPrefix}${
       entity.options.target ? entity.options.target.name : entity.options.name
     }Repository`;
   }
-  return `${connectionPrefix}${entity.name}Repository`;
+  return `${namespacePrefix}${connectionPrefix}${entity.name}Repository`;
 }
 
 /**
